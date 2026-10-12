@@ -4,7 +4,6 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const { sendBanatReplyWithTyping } = require("./banat-human");
 const { pickBanatReply, rememberBanatReply } = require("./banat-memory");
 const { chooseSocialResponse } = require("./banat-social");
@@ -23,28 +22,6 @@ function writeAtomic(f, obj) {                       // never leave a half-writt
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rnd = (a, b) => a + Math.random() * (b - a);
 const num = (v, min, max, fallback) => { const n = Number(v); return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback; };
-
-// ---------- admin password (hashed, constant-time compare) ----------
-const ADMIN_FILE = path.join(DATA, "admin.json");
-function hashPw(pw) {
-  const salt = crypto.randomBytes(16).toString("hex");
-  return { salt, hash: crypto.scryptSync(pw, salt, 32).toString("hex") };
-}
-function safeEq(a, b) {
-  const x = crypto.createHash("sha256").update(String(a)).digest();
-  const y = crypto.createHash("sha256").update(String(b)).digest();
-  return crypto.timingSafeEqual(x, y);
-}
-let adminRec = safeRead(ADMIN_FILE);                 // { salt, hash }  (old versions stored { password })
-if (adminRec.password && !adminRec.hash) { adminRec = hashPw(String(adminRec.password)); writeAtomic(ADMIN_FILE, adminRec); }
-const hasAdmin = () => !!(process.env.ADMIN_PASSWORD || adminRec.hash);
-function checkPw(pw) {
-  pw = String(pw || "");
-  if (process.env.ADMIN_PASSWORD) return safeEq(pw, process.env.ADMIN_PASSWORD);
-  if (!adminRec.hash) return false;
-  const h = crypto.scryptSync(pw, adminRec.salt, 32);
-  return crypto.timingSafeEqual(h, Buffer.from(adminRec.hash, "hex"));
-}
 
 // ---------- config ----------
 const CFG_FILE = path.join(DATA, "config.json");
@@ -292,23 +269,7 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/", (q, r) => r.sendFile(path.join(__dirname, "index.html")));   // only index.html is public
 app.get("/health", (q, r) => r.json({ ok: true }));
 
-app.post("/api/setup", (q, r) => {                   // first-run password (only works once)
-  const pw = String(q.body.password || "");
-  if (hasAdmin() || pw.length < 6) return r.status(400).json({ error: hasAdmin() ? "Already set" : "Min 6 characters" });
-  adminRec = hashPw(pw); writeAtomic(ADMIN_FILE, adminRec); r.json({ ok: true });
-});
-app.get("/api/needsetup", (q, r) => r.json({ setup: !hasAdmin() }));
-
-const fails = new Map();
-app.use("/api", (req, res, next) => {
-  const ip = req.ip, now = Date.now(), given = req.get("x-admin");
-  const f = (fails.get(ip) || []).filter((t) => now - t < 900e3);
-  if (f.length >= 10) return res.status(429).json({ error: "Too many wrong tries. Wait 15 min." });
-  if (hasAdmin() && given !== undefined && checkPw(given)) { fails.delete(ip); return next(); }
-  if (given !== undefined) { f.push(now); fails.set(ip, f); }
-  if (fails.size > 500) for (const [k, v] of fails) if (!v.some((t) => now - t < 900e3)) fails.delete(k);
-  res.status(401).json({ error: "unauthorized" });
-});
+// No dashboard password: anyone who has the URL can open the dashboard.
 
 const status = () => ({
   online: S.online, running: S.running, uid: S.uid, authDead: S.authDead,

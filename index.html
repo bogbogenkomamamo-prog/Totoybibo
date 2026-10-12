@@ -27,15 +27,13 @@ label{display:block;margin-top:10px;font-size:12px;color:var(--mut)}label input,
 <div class="c"><h2>Facebook session</h2><div class="m" id="ss"></div><textarea id="ck" rows="4" placeholder="Paste cookie / appstate (JSON array or c_user=...; xs=...)"></textarea><button class="acc" onclick="post('session',{cookie:ck.value}).then(()=>ck.value='')">Save & connect</button></div>
 <div class="c"><h2>Activity</h2><div class="m" id="err"></div><div id="log"></div></div>
 <script>
-let S={},K=localStorage.k||"";
+let S={};
 const $=i=>document.getElementById(i);
-(async()=>{const n=await (await fetch('/api/needsetup')).json();if(n.setup){const pw=prompt("Unang bukas: gumawa ng dashboard password (min 6)");
- const r=await fetch('/api/setup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:pw})});if(!r.ok)return alert((await r.json()).error);K=localStorage.k=pw}
- else if(!K)K=localStorage.k=prompt("Dashboard password");load();setTimeout(threads,1200)})();
+load();setTimeout(threads,1200);
 const dur=s=>`${s/3600|0}h ${s%3600/60|0}m ${s%60}s`;
 const ago=t=>{if(!t)return'wala pa';const s=(Date.now()-t)/1000|0;return s<90?s+'s ago':s<5400?(s/60|0)+'m ago':s<172800?(s/3600|0)+'h ago':(s/86400|0)+'d ago'};
-async function api(p,b){const r=await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'content-type':'application/json','x-admin':K},body:b?JSON.stringify(b):undefined});
- if(r.status==401||r.status==429){const j=await r.json().catch(()=>({}));if(r.status==429)return alert(j.error);localStorage.k=K=prompt("Wrong password, try again")||"";return}return r.json()}
+async function api(p,b){const r=await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'content-type':'application/json'},body:b?JSON.stringify(b):undefined});
+ return r.json()}
 async function post(p,b){const r=await api(p,b||{});if(r&&r.error)alert(r.error);load()}
 async function load(){const s=await api('status');if(!s||s.error)return;S=s;
  $('dead').style.display=s.authDead?'block':'none';

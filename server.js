@@ -57,6 +57,8 @@ const DEFAULTS = {
   openers: ["gm mga ka-GC 👋", "uy andito na ako", "kamusta kayo"],
 };
 const cfg = Object.assign({}, DEFAULTS, safeRead(CFG_FILE));
+// Reply behaviour is fixed (no dashboard settings): fast human-like timing, tuned to keep the login alive.
+Object.assign(cfg, { speed: "fast", selfReact: true, selfReactRate: 0.8, markRead: true, skipRate: 0.2 });
 // migrate old single-GC config -> list of GCs
 if (!Array.isArray(cfg.threadIds)) cfg.threadIds = [];
 if (cfg.threadId) { if (!cfg.threadIds.includes(String(cfg.threadId))) cfg.threadIds.push(String(cfg.threadId)); delete cfg.threadId; }
@@ -315,10 +317,6 @@ const status = () => ({
   stateRefreshedAt: cfg.stateRefreshedAt, savedAt: cfg.savedAt,
   autoReply: cfg.autoReply, threadIds: cfg.threadIds, repliesHour: S.replies.length, repliesDay: S.daily.length, suppressed: S.suppressed,
   attempts: S.attempts, nextRetry: S.nextRetry, lastError: S.lastError, cookieSaved: !!cfg.appState,
-  settings: {
-    speed: cfg.speed, selfReact: cfg.selfReact, selfReactRate: cfg.selfReactRate, markRead: cfg.markRead,
-    skipRate: cfg.skipRate,
-  },
   log: S.log.slice(0, 40),
 });
 app.get("/api/status", (q, r) => r.json(status()));
@@ -345,15 +343,6 @@ app.post("/api/session", (q, r) => {
     if (S.online) teardown();
     connect(); r.json(status());
   } catch (e) { r.status(400).json({ error: "Invalid cookie (need a JSON array or c_user=...; xs=...)" }); }
-});
-app.post("/api/settings", (q, r) => {
-  const b = q.body || {};
-  if (["fast", "normal", "slow"].includes(b.speed)) cfg.speed = b.speed;
-  if (typeof b.selfReact === "boolean") cfg.selfReact = b.selfReact;
-  if (typeof b.markRead === "boolean") cfg.markRead = b.markRead;
-  cfg.selfReactRate = num(b.selfReactRate, 0, 1, cfg.selfReactRate);
-  cfg.skipRate = num(b.skipRate, 0, 0.9, cfg.skipRate);
-  save(); log("system", "settings updated"); r.json(status());
 });
 app.get("/api/threads", (q, r) => {
   if (!S.api) return r.json([]);

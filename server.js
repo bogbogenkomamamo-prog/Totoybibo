@@ -80,7 +80,7 @@ const S = {
   authDead: false, started: Date.now(), botSince: null, lastConnected: null, lastDisconnected: null,
   attempts: 0, nextRetry: null, timer: null, listenTimer: null, listenFails: 0, pingFails: 0,
   lastEventAt: null, lastPing: null, nextPing: 0, lastStateJson: cfg.appState ? JSON.stringify(cfg.appState) : null,
-  lastError: null, replies: [], daily: [], suppressed: 0, awayUntil: 0,
+  lastError: null, replies: [], daily: [], suppressed: 0,
   heat: 0, heatUntil: 0, pauseUntil: 0, sendFails: 0, busyAt: new Map(), loginAt: 0, relistenAt: 0, lastSoft: 0, wdFixes: 0, wdLast: null, lastReset: 0, errLog: [], fatals: [], triedBackup: false,
   senders: new Map(), threads: new Map(), busy: new Set(), log: [],
 };
@@ -350,7 +350,6 @@ async function onEvent(ev) {
   const target = cfg.autoReply || (cfg.threadId && ev.threadID === cfg.threadId);
   if (!target || inQuiet()) return;
   if (Date.now() < S.pauseUntil) return;            // debuff level 3: full pause
-  if (Date.now() < S.awayUntil) return;              // "away" break: a real person isn't glued to the phone
   if (Math.random() < eff().skip) return;            // random skip (higher while debuffed)
   if (S.busy.has(ev.threadID)) return;               // don't talk over ourselves in the same chat
   if (!allowed(ev)) { S.suppressed++; return; }
@@ -377,10 +376,7 @@ async function onEvent(ev) {
       speed: cfg.speed,
       selfReact: cfg.selfReact ? { rate: cfg.selfReactRate } : false,   // only reacts to its OWN replies
     }), sleep(45000).then(() => { onSendResult(new Error("send timeout")); return false; })]);
-    if (ok) {
-      rememberBanatReply(ev.threadID, text, ev.senderID); log("bot", `reply [${social.type}] -> ${ev.threadID}`);
-      if (Math.random() < 0.06) { S.awayUntil = Date.now() + rnd(20, 90) * 60e3; log("bot", `away break ${Math.round((S.awayUntil - Date.now()) / 60e3)} min`); }
-    }
+    if (ok) { rememberBanatReply(ev.threadID, text, ev.senderID); log("bot", `reply [${social.type}] -> ${ev.threadID}`); }
   } finally { S.busy.delete(ev.threadID); S.busyAt.delete(ev.threadID); }
 }
 

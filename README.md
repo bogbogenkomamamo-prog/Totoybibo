@@ -25,7 +25,7 @@ Walang makapag-guarantee nito, si Facebook ang nagpapasya. Pero:
 
 ## Stealth profile (v2.2)
 - Boring/neutral replies lang (`replies.json`): walang opinyon, walang agree/disagree (walang "ok", "sige", "oo", "noted" at kahawig), walang tanong na mag-aanyaya ng usapan, walang tease.
-- Mababang footprint: Normal speed, skip ~45%, 60s cooldown/tao, max 3 reply/5 min kada GC, 10/oras, 60/araw, self-react 15%, quiet hours 00:30–07:30, at random na "away break" (20–90 min) paminsan-minsan.
+- Mababang footprint: Normal speed (medyo pinabilis), skip ~45%, 60s cooldown/tao, max 3 reply/5 min kada GC, 10/oras, 60/araw, self-react 15%, quiet hours 00:30–07:30.
 - Sa unang start ng bagong bersyon, ina-apply ito sa naka-save na `config.json` (isang beses lang). Pagkatapos, ang dashboard settings mo na ang masusunod.
 
 ## Asar mode (replies.json, 1000 replies)

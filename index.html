@@ -19,50 +19,33 @@ label{display:block;margin-top:10px;font-size:12px;color:var(--mut)}label input,
 
 <div class="c"><h2>Auto reply · all chats: <span id="auto"></span></h2><div class="m" id="st"></div><button class="go" onclick="post('auto',{on:!S.autoReply})">Toggle</button></div>
 
-<div class="c"><h2>Group chat</h2><div class="m">Piliin ang GC. Pag-Start, magse-send ng opener tapos auto reply (humanized, random skip). Kapag nag-restart ang server, kusa itong magre-resume.</div>
-<select id="gc" onchange="post('thread',{threadId:this.value})"></select><button onclick="threads()">Refresh list</button>
+<div class="c"><h2>Group chat</h2><div class="m">Lagyan ng check ang lahat ng GC na gusto mo. Pag-Start, magse-send ng opener tapos auto reply (mabilis na reply na may human delay). Kapag nag-restart ang server, kusa itong magre-resume.</div>
+<div id="gc"></div><button onclick="threads()">Refresh list</button>
 <div class="g"><button class="go" onclick="post('start')">▶ Start</button><button class="stop" onclick="post('stop')">■ Stop</button>
 <button onclick="post('reconnect')">Reconnect</button><button onclick="post('disconnect')">Disconnect</button></div></div>
-
-<div class="c"><h2>Reply settings</h2>
-<label>Bilis ng reply<select id="s_speed"><option value="fast">Fast (~1-3s)</option><option value="normal">Normal (~1-3s)</option><option value="slow">Slow (~5-9s)</option></select></label>
-<div class="g"><label>Self react<select id="s_self"><option value="1">ON</option><option value="0">OFF</option></select></label>
-<label>Self react chance (0-1)<input id="s_selfrate" type="number" step="0.05" min="0" max="1"></label></div>
-<label>Random skip (0-0.9)<input id="s_skip" type="number" step="0.05" min="0" max="0.9"></label>
-<div class="g"><label>Max replies / oras<input id="s_hour" type="number" min="1" max="300"></label><label>Max replies / araw<input id="s_day" type="number" min="1" max="3000"></label></div>
-<label>Mark as seen<select id="s_read"><option value="1">ON</option><option value="0">OFF</option></select></label>
-<label>Quiet hours (walang reply)<select id="s_q"><option value="0">OFF</option><option value="1">ON</option></select></label>
-<div class="g"><label>Start<input id="s_qs" type="time"></label><label>End<input id="s_qe" type="time"></label></div>
-<div class="m" id="tz"></div>
-<button class="acc" onclick="saveSettings()">Save settings</button></div>
 
 <div class="c"><h2>Facebook session</h2><div class="m" id="ss"></div><textarea id="ck" rows="4" placeholder="Paste cookie / appstate (JSON array or c_user=...; xs=...)"></textarea><button class="acc" onclick="post('session',{cookie:ck.value}).then(()=>ck.value='')">Save & connect</button></div>
 <div class="c"><h2>Activity</h2><div class="m" id="err"></div><div id="log"></div></div>
 <script>
-let S={},K=localStorage.k||"",filled=false;
+let S={},K=localStorage.k||"";
 const $=i=>document.getElementById(i);
-(async()=>{const n=await (await fetch('/api/needsetup')).json();
- if(!n.open&&!K)K=localStorage.k=prompt("Dashboard password")||"";
- load();setTimeout(threads,1200)})();
+(async()=>{const n=await (await fetch('/api/needsetup')).json();if(n.setup){const pw=prompt("Unang bukas: gumawa ng dashboard password (min 6)");
+ const r=await fetch('/api/setup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:pw})});if(!r.ok)return alert((await r.json()).error);K=localStorage.k=pw}
+ else if(!K)K=localStorage.k=prompt("Dashboard password");load();setTimeout(threads,1200)})();
 const dur=s=>`${s/3600|0}h ${s%3600/60|0}m ${s%60}s`;
 const ago=t=>{if(!t)return'wala pa';const s=(Date.now()-t)/1000|0;return s<90?s+'s ago':s<5400?(s/60|0)+'m ago':s<172800?(s/3600|0)+'h ago':(s/86400|0)+'d ago'};
 async function api(p,b){const r=await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'content-type':'application/json','x-admin':K},body:b?JSON.stringify(b):undefined});
  if(r.status==401||r.status==429){const j=await r.json().catch(()=>({}));if(r.status==429)return alert(j.error);localStorage.k=K=prompt("Wrong password, try again")||"";return}return r.json()}
 async function post(p,b){const r=await api(p,b||{});if(r&&r.error)alert(r.error);load()}
-function fill(s){const t=s.settings;$('s_speed').value=t.speed;$('s_self').value=t.selfReact?'1':'0';$('s_selfrate').value=t.selfReactRate;
- $('s_skip').value=t.skipRate;$('s_hour').value=t.hourlyMax;$('s_day').value=t.dailyMax;$('s_read').value=t.markRead?'1':'0';
- $('s_q').value=t.quiet.on?'1':'0';$('s_qs').value=t.quiet.start.padStart(5,'0');$('s_qe').value=t.quiet.end.padStart(5,'0');$('tz').textContent='Timezone: '+t.tz;filled=true}
-function saveSettings(){post('settings',{speed:$('s_speed').value,selfReact:$('s_self').value=='1',selfReactRate:+$('s_selfrate').value,
- skipRate:+$('s_skip').value,hourlyMax:+$('s_hour').value,dailyMax:+$('s_day').value,markRead:$('s_read').value=='1',
- quiet:{on:$('s_q').value=='1',start:$('s_qs').value,end:$('s_qe').value}})}
-async function load(){const s=await api('status');if(!s||s.error)return;const was=S.online;S=s;if(!filled)fill(s);if(!was&&s.online)threads();
+async function load(){const s=await api('status');if(!s||s.error)return;S=s;
  $('dead').style.display=s.authDead?'block':'none';
- $('on').textContent=s.online?'ONLINE':(s.logging?'CONNECTING…':'OFFLINE');$('on').className='v '+(s.online?'ok':(s.logging?'warn':'bad'));$('run').textContent=s.running?(s.quietNow?'QUIET':'RUNNING'):'PAUSED';$('run').className='v '+(s.running?(s.quietNow?'warn':'ok'):'bad');
+ $('on').textContent=s.online?'ONLINE':'OFFLINE';$('on').className='v '+(s.online?'ok':'bad');$('run').textContent=s.running?'RUNNING':'PAUSED';$('run').className='v '+(s.running?'ok':'bad');
  $('su').textContent=dur(s.serverUptime);$('bu').textContent=dur(s.botUptime);$('auto').textContent=s.autoReply?'ON':'OFF';$('auto').className=s.autoReply?'ok':'bad';
  $('st').textContent=`Replies: ${s.repliesHour}/oras · ${s.repliesDay}/araw · Blocked by anti-spam: ${s.suppressed}`;
- $('health').textContent=`Cookie na-refresh: ${ago(s.stateRefreshedAt)} · Last health check: ${ago(s.lastPing)} · Last event: ${ago(s.lastEventAt)} · Connected: ${ago(s.lastConnected)} · Debuff: ${s.paused?'PAUSED':s.heat?'level '+s.heat+'/3':'normal'} · Auto-fixes: ${s.wdFixes}${s.wdLast?' (huli: '+s.wdLast.msg+', '+ago(s.wdLast.t)+')':''}`;
+ $('health').textContent=`Cookie na-refresh: ${ago(s.stateRefreshedAt)} · Last health check: ${ago(s.lastPing)} · Last event: ${ago(s.lastEventAt)} · Connected: ${ago(s.lastConnected)}`;
  $('ss').textContent=s.cookieSaved?`Cookie saved (${ago(s.savedAt)}) · ${s.uid||'not connected'}`:'Walang cookie';$('err').textContent=s.lastError||'';
  $('log').innerHTML=s.log.map(l=>`<div><b>${l.who}</b> ${l.msg.replace(/</g,'&lt;')}<br>${new Date(l.t).toLocaleTimeString()}</div>`).join('')}
-async function threads(){const t=await api('threads')||[];$('gc').innerHTML='<option value="">— pili ng GC —</option>'+t.map(x=>`<option value="${x.id}" ${x.id==S.threadId?'selected':''}>${x.name.replace(/</g,'')}</option>`).join('')}
-(function tick(){setTimeout(async()=>{try{await load()}catch{}tick()},S.online?3000:1000)})();
+async function threads(){const t=await api('threads')||[];const on=S.threadIds||[];
+ $('gc').innerHTML=t.map(x=>`<label style="display:flex;align-items:center;gap:10px;color:#eee;font-size:14px"><input type="checkbox" style="width:auto;margin:0" ${on.includes(String(x.id))?'checked':''} onchange="post('thread',{threadId:'${x.id}',on:this.checked})">${x.name.replace(/</g,'&lt;')}</label>`).join('')||'<div class="m">Walang GC na nakita</div>'}
+setInterval(load,3000);
 </script></body></html>

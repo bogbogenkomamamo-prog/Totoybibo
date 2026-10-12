@@ -1,6 +1,6 @@
 {
   "name": "celestial-lite",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "description": "Celestial Lite: humanized auto-reply + self-react only, built for long sessions",
   "main": "server.js",
   "scripts": {

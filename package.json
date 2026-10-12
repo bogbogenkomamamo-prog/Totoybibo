@@ -1,0 +1,17 @@
+{
+  "name": "celestial-lite",
+  "version": "2.5.0",
+  "description": "Celestial Lite: humanized auto-reply + self-react only, built for long sessions",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check banat-human.js && node --check banat-memory.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "@dongdev/fca-unofficial": "latest"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

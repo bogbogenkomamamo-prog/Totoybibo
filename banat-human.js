@@ -14,7 +14,7 @@ const MAX_DELAY_MS = Math.max(2500, Number(process.env.BANAT_MAX_HUMAN_DELAY_MS 
 // roughly 1-3 seconds instead of 3-8.
 const SPEED = {
   fast:   { reaction: 0.45, typing: 0.5, maxReaction: 900,  maxTyping: 2800, minReaction: 100, minTyping: 300 },
-  normal: { reaction: 0.85, typing: 0.85, maxReaction: 1500, maxTyping: Math.min(MAX_DELAY_MS, 5000), minReaction: 120, minTyping: 350 },
+  normal: { reaction: 1,    typing: 1,   maxReaction: 1800, maxTyping: MAX_DELAY_MS, minReaction: 120, minTyping: 350 },
   slow:   { reaction: 1.4,  typing: 1.3, maxReaction: 2600, maxTyping: MAX_DELAY_MS, minReaction: 120, minTyping: 350 },
 };
 
@@ -74,7 +74,7 @@ function prepareBanatReply(threadID, message, incomingText = "", options = {}) {
     caseVariationRate: Number(process.env.BANAT_CASE_VARIATION_RATE || 0.035),
     spaceVariationRate: Number(process.env.BANAT_SPACE_SLIP_RATE || 0.018),
     abbreviate: true,
-    typos: true,
+    typos: !/sinzu/i.test(message),   // keep the signed guard reply clean
     punctuation: true,
   });
 

@@ -41,7 +41,7 @@ const DEFAULTS = {
   autoReply: false, threadId: null, running: false,
   speed: "normal", selfReact: true, selfReactRate: 0.15, markRead: true,
   skipRate: 0.45, senderCooldownS: 60, hourlyMax: 10, dailyMax: 60, threadMax: 3, threadWindowS: 300,
-  quiet: { on: true, start: "00:30", end: "07:30" }, tz: process.env.BOT_TZ || "Asia/Manila",
+  tz: process.env.BOT_TZ || "Asia/Manila",
   openers: ["hello", "uy"],
   profile: "stealth-v1",
 };
@@ -57,10 +57,10 @@ function loadCfg() {                                 // heal: corrupt config.jso
   return {};
 }
 const cfg = Object.assign({}, DEFAULTS, loadCfg());
-cfg.quiet = Object.assign({}, DEFAULTS.quiet, cfg.quiet);
+delete cfg.quiet;                                  // quiet hours removed
 if (cfg.profile !== DEFAULTS.profile) {
   for (const k of STEALTH_V1) cfg[k] = DEFAULTS[k];
-  cfg.quiet = Object.assign({}, DEFAULTS.quiet); cfg.profile = DEFAULTS.profile;
+  cfg.profile = DEFAULTS.profile;
   try { writeAtomic(CFG_FILE, cfg); } catch {}
 }
 const save = () => { try { try { JSON.parse(fs.readFileSync(CFG_FILE, "utf8")); fs.copyFileSync(CFG_FILE, CFG_FILE + ".bak"); } catch {} writeAtomic(CFG_FILE, cfg); } catch (e) { console.error("[save]", e.message); } };
@@ -102,22 +102,6 @@ function parseCookie(raw) {
   const keys = new Set(arr.map((c) => c.key || c.name));
   if (!keys.has("c_user") || !keys.has("xs")) throw new Error("missing c_user / xs");
   return arr;
-}
-
-// ---------- quiet hours (so it doesn't reply at 3am like a robot) ----------
-function localMinutes() {
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: cfg.tz, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date());
-  const h = Number(parts.find((p) => p.type === "hour").value) % 24;
-  const m = Number(parts.find((p) => p.type === "minute").value);
-  return h * 60 + m;
-}
-const toMin = (s) => { const [h, m] = String(s || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
-function inQuiet() {
-  if (!cfg.quiet.on) return false;
-  try {
-    const n = localMinutes(), a = toMin(cfg.quiet.start), b = toMin(cfg.quiet.end);
-    return a <= b ? n >= a && n < b : n >= a || n < b;
-  } catch { return false; }
 }
 
 // ---------- session keep-alive: the part that decides how long a login survives ----------
@@ -277,7 +261,7 @@ function watchdog() {
   if (!S.online) return;
   if (!S.stopListen && !(S.relistenAt && now < S.relistenAt + 10e3)) { wdFix("listener was missing, restarted"); return startListen(); }
   const ref = S.lastEventAt || S.lastConnected || now;
-  if (S.running && !inQuiet() && now - ref > 3 * 3600e3 && now - S.lastSoft > 6 * 3600e3) {
+  if (S.running && now - ref > 3 * 3600e3 && now - S.lastSoft > 6 * 3600e3) {
     S.lastSoft = now; wdFix("no events for 3h, refreshing listener on same login"); startListen();
   }
 }
@@ -348,7 +332,7 @@ async function onEvent(ev) {
   if (!ev) return;
   if ((ev.type !== "message" && ev.type !== "message_reply") || !ev.body || String(ev.senderID) === S.uid || !S.running) return;
   const target = cfg.autoReply || (cfg.threadId && ev.threadID === cfg.threadId);
-  if (!target || inQuiet()) return;
+  if (!target) return;
   if (Date.now() < S.pauseUntil) return;            // debuff level 3: full pause
   if (Date.now() < S.awayUntil) return;              // "away" break: a real person isn't glued to the phone
   if (Math.random() < eff().skip) return;            // random skip (higher while debuffed)
@@ -365,21 +349,24 @@ async function onEvent(ev) {
     const text = typeof r === "string" && r ? r : ALL_REPLIES[Math.floor(Math.random() * ALL_REPLIES.length)];
 
     const now = Date.now();
-    S.replies.push(now); S.daily.push(now); S.senders.set(ev.senderID, now); S.threads.get(ev.threadID).push(now);
+    S.replies.push(now); S.daily.push(now); S.senders.set(ev.senderID, now); (S.threads.get(ev.threadID) || S.threads.set(ev.threadID, []).get(ev.threadID)).push(now);
 
     if (cfg.markRead && typeof api.markAsRead === "function") {   // "seen" shortly after it arrives, like a person
       setTimeout(() => { try { api.markAsRead(ev.threadID, true, () => {}); } catch {} }, rnd(250, 1200));
     }
 
-    const ok = await Promise.race([sendBanatReplyWithTyping(api, text, ev.threadID, null, {
+    let toId;                                         // send watchdog: must be CANCELLED once the send finishes
+    const timeout = new Promise((res) => { toId = setTimeout(() => { onSendResult(new Error("send timeout")); res(false); }, 45000); });
+    let ok;
+    try { ok = await Promise.race([sendBanatReplyWithTyping(api, text, ev.threadID, null, {
       trafficSendMessage: sendRaw,
       incomingText: ev.body,
       speed: cfg.speed,
       selfReact: cfg.selfReact ? { rate: cfg.selfReactRate } : false,   // only reacts to its OWN replies
-    }), sleep(45000).then(() => { onSendResult(new Error("send timeout")); return false; })]);
+    }), timeout]); } finally { clearTimeout(toId); }
     if (ok) {
       rememberBanatReply(ev.threadID, text, ev.senderID); log("bot", `reply [${social.type}] -> ${ev.threadID}`);
-      if (Math.random() < 0.06) { S.awayUntil = Date.now() + rnd(20, 90) * 60e3; log("bot", `away break ${Math.round((S.awayUntil - Date.now()) / 60e3)} min`); }
+      if (Math.random() < awayCfg().rate) { S.awayUntil = Date.now() + rnd(awayCfg().min, awayCfg().max) * 60e3; log("bot", `away break ${Math.round((S.awayUntil - Date.now()) / 60e3)} min`); }
     }
   } finally { S.busy.delete(ev.threadID); S.busyAt.delete(ev.threadID); }
 }
@@ -423,10 +410,10 @@ const status = () => ({
   attempts: S.attempts, nextRetry: S.nextRetry, lastError: S.lastError, cookieSaved: !!cfg.appState,
   settings: {
     speed: cfg.speed, selfReact: cfg.selfReact, selfReactRate: cfg.selfReactRate, markRead: cfg.markRead,
-    skipRate: cfg.skipRate, hourlyMax: cfg.hourlyMax, dailyMax: cfg.dailyMax, quiet: cfg.quiet, tz: cfg.tz,
+    skipRate: cfg.skipRate, hourlyMax: cfg.hourlyMax, dailyMax: cfg.dailyMax, quiet: { on: false, start: "00:00", end: "00:00" }, tz: cfg.tz,
   },
   heat: S.heat, paused: Date.now() < S.pauseUntil, pauseUntil: S.pauseUntil, wdFixes: S.wdFixes, wdLast: S.wdLast,
-  quietNow: inQuiet(), log: S.log.slice(0, 40),
+  quietNow: false, log: S.log.slice(0, 40),
 });
 app.get("/api/status", (q, r) => r.json(status()));
 app.post("/api/auto", (q, r) => { cfg.autoReply = !!q.body.on; save(); r.json(status()); });
@@ -455,10 +442,6 @@ app.post("/api/settings", (q, r) => {
   cfg.skipRate = num(b.skipRate, 0, 0.9, cfg.skipRate);
   cfg.hourlyMax = Math.round(num(b.hourlyMax, 1, 300, cfg.hourlyMax));
   cfg.dailyMax = Math.round(num(b.dailyMax, 1, 3000, cfg.dailyMax));
-  if (b.quiet && typeof b.quiet === "object") {
-    const ok = (s) => /^([01]?\d|2[0-3]):[0-5]\d$/.test(String(s));
-    cfg.quiet = { on: !!b.quiet.on, start: ok(b.quiet.start) ? b.quiet.start : cfg.quiet.start, end: ok(b.quiet.end) ? b.quiet.end : cfg.quiet.end };
-  }
   save(); log("system", "settings updated"); r.json(status());
 });
 app.get("/api/threads", (q, r) => {
@@ -471,5 +454,278 @@ app.get("/api/threads", (q, r) => {
 process.on("uncaughtException", (e) => { log("fatal", (e && e.stack) || e); try { selfHeal("fatal", e); } catch {} });
 process.on("unhandledRejection", (e) => { log("fatal", (e && e.stack) || e); try { selfHeal("fatal", e); } catch {} });
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { captureState("shutdown"); save(); process.exit(0); });
+
+// =====================================================================================
+// UNKILLABLE ADD-ON — additive only. Walang binago sa existing functions sa taas.
+// Adds: file log + rotation, crash-loop guard, counters/heat persistence, cookie generations,
+// event-loop stall watchdog, zombie-connection detector, capped auth soft-retry,
+// http hardening, /healthz, crash trail, exit hook, signal/pipe hardening, optional self-ping.
+// =====================================================================================
+(function unkillable() {
+  const HOUR = 3600e3;
+  const P = (f) => path.join(DATA, f);
+  const tryDo = (fn, tag) => { try { return fn(); } catch (e) { try { process.stderr.write("[addon:" + tag + "] " + (e && e.message) + "\n"); } catch {} } };
+
+  // 0) leftover half-written files from a hard kill
+  tryDo(() => { for (const f of fs.readdirSync(DATA)) if (f.endsWith(".tmp")) fs.unlinkSync(P(f)); }, "tmp");
+
+  // 1) persistent log file (bot.log, rotates at ~1MB, keeps 3) — mirrors console output
+  const LOG = P("bot.log"); let wc = 0;
+  const wrap = (name) => {
+    const orig = console[name].bind(console);
+    console[name] = (...a) => {
+      orig(...a);
+      tryDo(() => {
+        const line = a.map((x) => (typeof x === "string" ? x : (x && x.stack) || JSON.stringify(x))).join(" ");
+        fs.appendFile(LOG, new Date().toISOString() + " " + line + "\n", () => {});
+        if (++wc % 200 === 0 && fs.statSync(LOG).size > 1048576) {
+          for (let i = 2; i >= 1; i--) if (fs.existsSync(LOG + "." + i)) fs.renameSync(LOG + "." + i, LOG + "." + (i + 1));
+          fs.renameSync(LOG, LOG + ".1");
+        }
+      }, "log");
+    };
+  };
+  wrap("log"); wrap("error");
+
+  // 2) boot report + crash-loop guard (pinipigilan ang login-spam kapag paulit-ulit na nagre-restart)
+  tryDo(() => {
+    const now = Date.now();
+    const boots = (safeRead(P("boots.json")).t || []).filter((t) => now - t < 600e3); boots.push(now);
+    writeAtomic(P("boots.json"), { t: boots });
+    const hb = safeRead(P("heartbeat.json"));
+    if (hb.ts) console.log("[addon] boot — down ~" + Math.round((now - hb.ts) / 1000) + "s since last heartbeat" + (hb.clean ? " (clean stop)" : " (unclean stop)"));
+    if (boots.length >= 4) {
+      const w = Math.min(20000, 5000 * (boots.length - 3));
+      console.log("[addon] crash-loop (" + boots.length + " boots/10min), waiting " + w / 1000 + "s before login");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, w);   // server not listening yet, safe to block
+    }
+  }, "boot");
+
+  // 3) persist send counters + heat/pause/away so a restart can't reset the safety limits
+  const persist = () => tryDo(() => writeAtomic(P("runtime.json"), {
+    replies: S.replies, daily: S.daily, heat: S.heat, heatUntil: S.heatUntil, pauseUntil: S.pauseUntil, awayUntil: S.awayUntil, at: Date.now(),
+  }), "persist");
+  tryDo(() => {
+    const r = safeRead(P("runtime.json")), now = Date.now();
+    if (Array.isArray(r.replies)) S.replies = r.replies.filter((t) => now - t < HOUR);
+    if (Array.isArray(r.daily)) S.daily = r.daily.filter((t) => now - t < 24 * HOUR);
+    for (const k of ["heat", "heatUntil", "pauseUntil", "awayUntil"]) if (Number.isFinite(r[k])) S[k] = r[k];
+  }, "restore");
+
+  // 4) cookie generations: last 5 DIFFERENT cookies that were actually online
+  const GEN = 5; let lastGen = null;
+  tryDo(() => { lastGen = JSON.stringify(safeRead(P("appstate.gen1.json"))); }, "gen-init");
+  const saveGen = () => tryDo(() => {
+    if (!S.online || !Array.isArray(cfg.appState) || !cfg.appState.length) return;
+    const j = JSON.stringify(cfg.appState); if (j === lastGen) return; lastGen = j;
+    for (let i = GEN - 1; i >= 1; i--) if (fs.existsSync(P("appstate.gen" + i + ".json"))) fs.renameSync(P("appstate.gen" + i + ".json"), P("appstate.gen" + (i + 1) + ".json"));
+    writeAtomic(P("appstate.gen1.json"), cfg.appState);
+  }, "gen");
+  // if config lost its cookie (wiped volume / corrupt), restore the newest saved one
+  tryDo(() => {
+    if (cfg.appState) return;
+    for (const f of ["appstate.gen1.json", "appstate.backup.json", "appstate.gen2.json", "appstate.gen3.json", "appstate.gen4.json", "appstate.gen5.json"]) {
+      const a = safeRead(P(f));
+      if (Array.isArray(a) && a.length) { cfg.appState = a; S.lastStateJson = JSON.stringify(a); save(); console.log("[addon] cookie restored from " + f); break; }
+    }
+  }, "cookie-restore");
+
+  // 5) event-loop stall watchdog: 3 ticks in a row with >8s lag = frozen process -> clean restart
+  let lastTick = Date.now(), lagHits = 0;
+  setInterval(() => {
+    const now = Date.now(), lag = now - lastTick - 1000; lastTick = now;
+    lagHits = lag > 8000 ? lagHits + 1 : 0;
+    if (lagHits >= 3) { lagHits = 0; restartProcess("event loop stalled (" + Math.round(lag / 1000) + "s lag x3)"); }
+  }, 1000).unref();
+
+  // 6) 30s supervisor: heartbeat, persistence, cookie gens, zombie detector, capped auth soft-retry
+  const AUTH_RETRY_MS = (Number(process.env.AUTH_RETRY_HOURS) || 6) * HOUR;
+  let tick = 0, deadAt = 0, authTries = 0;
+  setInterval(() => tryDo(() => {
+    const now = Date.now(); tick++;
+    tryDo(() => writeAtomic(P("heartbeat.json"), { ts: now, clean: false, online: S.online, running: S.running }), "hb");
+    if (tick % 2 === 0) { persist(); saveGen(); }
+
+    // zombie: "online" pero walang successful ping/connect nang >2h (hung callback, silent MQTT)
+    if (S.online && !S.logging) {
+      const ref = Math.max(S.lastPing || 0, S.lastConnected || 0);
+      if (ref && now - ref > 2 * HOUR) { console.log("[addon] zombie connection (no ping 2h) -> reconnect"); drop(); }
+    }
+
+    // auth marked dead (misclassified errors happen): up to 3 gentle retries, 6h apart, then wait for a fresh cookie
+    if (S.authDead && !S.manualOff && cfg.appState) {
+      if (!deadAt) deadAt = now;
+      if (authTries < 3 && now - deadAt > AUTH_RETRY_MS * (authTries + 1)) {
+        authTries++;
+        console.log("[addon] auth dead for " + Math.round((now - deadAt) / HOUR) + "h — soft retry " + authTries + "/3 on same cookie");
+        S.authDead = false; S.triedBackup = false; S.attempts = 0; connect();
+      }
+    } else if (S.online) { deadAt = 0; authTries = 0; }
+  }, "supervisor"), 30e3).unref();
+
+  // 7) HTTP hardening + /healthz (point UptimeRobot/Railway healthcheck here)
+  const _listen = app.listen.bind(app);
+  app.listen = (...a) => {
+    const srv = _listen(...a);
+    srv.keepAliveTimeout = 65e3; srv.headersTimeout = 70e3; srv.requestTimeout = 30e3;
+    srv.on("clientError", (e, sock) => { try { sock.destroy(); } catch {} });
+    srv.on("error", (e) => { console.error("[addon] http server error: " + (e && e.message)); setTimeout(() => restartProcess("http server error " + (e && e.code)), 3000); });
+    return srv;
+  };
+  app.get("/healthz", (q, r) => r.json({
+    ok: true, online: S.online, running: S.running, authDead: S.authDead, heat: S.heat,
+    idleMin: S.lastEventAt ? Math.round((Date.now() - S.lastEventAt) / 60e3) : null,
+    rssMB: Math.round(process.memoryUsage().rss / 1048576), upS: Math.round(process.uptime()),
+  }));
+  app.use((err, q, r, next) => {                      // eslint-disable-line no-unused-vars
+    console.error("[addon] express: " + (err && err.message));
+    if (!r.headersSent) r.status((err && err.status) || 500).json({ error: "server error" });
+  });
+
+  // 8) crash trail, exit hook, signals
+  const crash = (tag) => (e) => tryDo(() => {
+    const f = P("crash.log");
+    try { if (fs.statSync(f).size > 524288) fs.unlinkSync(f); } catch {}
+    fs.appendFileSync(f, new Date().toISOString() + " " + tag + " " + ((e && e.stack) || e) + "\n");
+  }, "crash");
+  process.on("uncaughtException", crash("uncaughtException"));
+  process.on("unhandledRejection", crash("unhandledRejection"));
+  process.on("exit", (code) => tryDo(() => {
+    captureState("exit"); persist();
+    writeAtomic(P("heartbeat.json"), { ts: Date.now(), clean: code === 0, online: false });
+  }, "exit"));
+  process.on("SIGHUP", () => console.log("[addon] SIGHUP ignored (terminal closed)"));
+  process.stdout.on("error", () => {}); process.stderr.on("error", () => {});   // EPIPE shouldn't kill us
+
+  // 9) optional keep-awake for hosts that sleep idle apps (set SELF_URL, or Render sets RENDER_EXTERNAL_URL)
+  const SELF = (process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/$/, "");
+  if (SELF && typeof fetch === "function") {
+    setInterval(() => { fetch(SELF + "/health", { signal: AbortSignal.timeout(15000) }).catch(() => {}); }, 4 * 60e3).unref();
+  }
+
+  console.log("[addon] unkillable layer active");
+})();
+
+// =====================================================================================
+// FAST-LOGIN + 1-WEEK COOKIE LAYER — additive only. Walang binago sa existing functions.
+// Adds: login timer log, early cookie capture after login, cookie expiry floor (>= COOKIE_MIN_DAYS),
+// volume mirror of the cookie, APPSTATE env seed, one fast first-retry on network blips,
+// boot warnings if the cookie can't survive a redeploy.
+// =====================================================================================
+(function sessionLayer() {
+  const DAY = 86400e3;
+  const MIN_DAYS = Number(process.env.COOKIE_MIN_DAYS) || 7;
+  const tryDo = (fn, tag) => { try { return fn(); } catch (e) { try { process.stderr.write("[session:" + tag + "] " + (e && e.message) + "\n"); } catch {} } };
+
+  // ---- where the cookie can survive a redeploy ----
+  const MIRROR = process.env.MIRROR_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || "";
+  const MIR = MIRROR && path.resolve(MIRROR) !== path.resolve(DATA) ? path.join(MIRROR, "celestial-session") : null;
+  if (MIR) tryDo(() => fs.mkdirSync(MIR, { recursive: true }), "mirror-dir");
+
+  tryDo(() => {
+    const vol = process.env.RAILWAY_VOLUME_MOUNT_PATH;
+    if (vol && !path.resolve(DATA).startsWith(path.resolve(vol))) {
+      console.log("[session] WARNING: DATA_DIR is not on the Railway volume (" + vol + "). Set DATA_DIR=" + vol + " so the cookie survives redeploys. Mirror copy is active as backup.");
+    } else if (!vol && process.env.RAILWAY_ENVIRONMENT && !process.env.DATA_DIR) {
+      console.log("[session] WARNING: no volume attached — the saved cookie is wiped on every redeploy. Add a Railway volume and set DATA_DIR to its mount path, or set the APPSTATE variable.");
+    }
+  }, "vol-warn");
+
+  // ---- cookie recovery chain at boot (config -> gens [addon 1] -> volume mirror -> APPSTATE env) ----
+  tryDo(() => {
+    if (cfg.appState || !MIR) return;
+    const m = safeRead(path.join(MIR, "appstate.json"));
+    if (Array.isArray(m.state) && m.state.length) { cfg.appState = m.state; S.lastStateJson = JSON.stringify(m.state); save(); console.log("[session] cookie restored from volume mirror"); }
+  }, "mirror-restore");
+  tryDo(() => {
+    if (cfg.appState || !process.env.APPSTATE) return;
+    cfg.appState = parseCookie(process.env.APPSTATE); cfg.savedAt = Date.now(); S.lastStateJson = JSON.stringify(cfg.appState); save();
+    console.log("[session] cookie seeded from APPSTATE variable");
+  }, "env-seed");
+
+  // ---- expiry floor: never let a loaded cookie be thrown away client-side before COOKIE_MIN_DAYS ----
+  // (Facebook still decides whether the session itself is valid — this only stops the local jar from dropping it.)
+  // <norm>
+  const toMs = (v) => (typeof v === "number" ? (v > 1e11 ? v : v * 1000) : Date.parse(v));
+  const norm = (arr, now) => {
+    const floor = (now || Date.now()) + MIN_DAYS * DAY; let n = 0;
+    for (const c of arr) {
+      if (!c || typeof c !== "object") continue;
+      const raw = c.expires != null ? c.expires : (c.expirationDate != null ? c.expirationDate : null);
+      if (raw == null || raw === "Infinity" || raw === -1) continue;      // session / never-expiring: nothing to extend
+      const t = toMs(raw);
+      if (!Number.isFinite(t) || t >= floor) continue;                     // unparseable or already long enough: leave alone
+      c.expires = new Date(floor).toUTCString();
+      if (c.expirationDate != null) c.expirationDate = Math.floor(floor / 1000);
+      n++;
+    }
+    return n;
+  };
+  // </norm>
+
+  tryDo(() => {
+    if (!cfg.appState) return console.log("[session] no cookie on disk — paste one in the dashboard or set APPSTATE");
+    const ref = cfg.stateRefreshedAt || cfg.savedAt;
+    if (ref) console.log("[session] cookie last refreshed " + Math.round((Date.now() - ref) / 36e5) + "h ago");
+    const n = norm(cfg.appState);
+    if (n) { S.lastStateJson = JSON.stringify(cfg.appState); console.log("[session] extended expiry on " + n + " short-lived cookie(s) to >= " + MIN_DAYS + " days"); }
+  }, "boot-report");
+
+  // ---- mirror the last known-good cookie to the volume (only while actually online) ----
+  let lastMir = null;
+  setInterval(() => tryDo(() => {
+    if (!MIR || !S.online || !Array.isArray(cfg.appState) || !cfg.appState.length) return;
+    const j = JSON.stringify(cfg.appState); if (j === lastMir) return; lastMir = j;
+    writeAtomic(path.join(MIR, "appstate.json"), { at: Date.now(), state: cfg.appState });
+  }, "mirror"), 60e3).unref();
+
+  // ---- 1s watcher: login timer, early cookie capture, one fast first-retry on network blips ----
+  let seenConn = S.lastConnected, fastFor = null;
+  setInterval(() => tryDo(() => {
+    if (S.lastConnected && S.lastConnected !== seenConn) {
+      seenConn = S.lastConnected;
+      if (S.loginAt && S.lastConnected >= S.loginAt) console.log("[session] login took " + ((S.lastConnected - S.loginAt) / 1000).toFixed(1) + "s");
+      for (const s of [20, 90, 300]) setTimeout(() => tryDo(() => captureState("post-login +" + s + "s"), "capture"), s * 1000).unref();   // Facebook rotates tokens early; save them fast
+    }
+    if (!S.online && !S.logging && !S.authDead && !S.manualOff && cfg.appState && S.attempts === 1 && S.nextRetry && S.nextRetry !== fastFor
+        && (!S.lastError || NET_RE.test(String(S.lastError)))) {
+      const w = 700 + rnd(0, 900);
+      clearTimeout(S.timer); S.nextRetry = Date.now() + w; fastFor = S.nextRetry; S.timer = setTimeout(connect, w);
+      console.log("[session] network blip — fast first reconnect in " + Math.round(w) + "ms");
+    }
+  }, "watch"), 1000).unref();
+})();
+
+// ---- one-time: clear the false "send timeout" debuff left over from the old timer bug ----
+(function clearFalseDebuff() {
+  try {
+    const mk = path.join(DATA, "fix-sendtimeout-v1.done");
+    if (fs.existsSync(mk)) return;
+    S.heat = 0; S.heatUntil = 0; S.pauseUntil = 0; S.sendFails = 0;
+    writeAtomic(path.join(DATA, "runtime.json"), { replies: S.replies, daily: S.daily, heat: 0, heatUntil: 0, pauseUntil: 0, awayUntil: S.awayUntil, at: Date.now() });
+    fs.writeFileSync(mk, String(Date.now()));
+    console.log("[heal] cleared false send-timeout debuff (one-time)");
+  } catch (e) { try { process.stderr.write("[clearFalseDebuff] " + (e && e.message) + "\n"); } catch {} }
+})();
+
+// ---- FASTER REPLIES ----
+// Away breaks are now OFF by default (were 6% per reply, 20-90 min). To bring them back set AWAY_RATE (0-1), AWAY_MIN_MIN, AWAY_MAX_MIN.
+function awayCfg() {
+  const raw = process.env.AWAY_RATE, r = Number(raw), a = Number(process.env.AWAY_MIN_MIN), b = Number(process.env.AWAY_MAX_MIN);
+  const min = a > 0 ? a : 5;
+  return { rate: raw !== undefined && raw !== "" && Number.isFinite(r) ? Math.max(0, Math.min(1, r)) : 0, min, max: b > 0 ? Math.max(b, min) : Math.max(25, min) };
+}
+// Reply speed -> "fast" once (dashboard changes after that are respected). REPLY_SPEED=fast|normal|slow overrides on every boot.
+(function fastReplies() {
+  try {
+    if (awayCfg().rate === 0) S.awayUntil = 0;       // drop any away break restored from the last run
+    const env = String(process.env.REPLY_SPEED || "").toLowerCase();
+    if (["fast", "normal", "slow"].includes(env)) { cfg.speed = env; save(); console.log("[addon] reply speed = " + env + " (REPLY_SPEED)"); return; }
+    const mk = path.join(DATA, "fix-fast-v1.done");
+    if (fs.existsSync(mk)) return;
+    cfg.speed = "fast"; save(); fs.writeFileSync(mk, String(Date.now()));
+    console.log("[addon] reply speed set to fast (one-time)");
+  } catch (e) { try { process.stderr.write("[fastReplies] " + (e && e.message) + "\n"); } catch {} }
+})();
 
 app.listen(PORT, () => { log("system", "server on " + PORT); if (cfg.appState) connect(); });

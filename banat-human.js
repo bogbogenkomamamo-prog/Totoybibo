@@ -108,13 +108,19 @@ function prepareBanatReply(threadID, message, incomingText = "", options = {}) {
 }
 
 function react(api, emoji, messageID, threadID) {
-  if (!api || !emoji || !messageID) return;
+  if (!api || !emoji || !messageID || !threadID) return;
+  const noop = () => {};
   try {
+    // fca signature: (reaction, messageID, threadID, callback). threadID MUST be the 3rd arg,
+    // otherwise the library rejects with "Missing required parameters".
+    let result;
     if (typeof api.setMessageReactionMqtt === "function") {
-      api.setMessageReactionMqtt(emoji, String(messageID), String(threadID), () => {});
+      result = api.setMessageReactionMqtt(emoji, String(messageID), String(threadID), noop);
     } else if (typeof api.setMessageReaction === "function") {
-      api.setMessageReaction(emoji, String(messageID), () => {}, true);
+      result = api.setMessageReaction(emoji, String(messageID), String(threadID), noop, true);
     }
+    // The library may reject asynchronously; swallow it so it never reaches unhandledRejection.
+    if (result && typeof result.catch === "function") result.catch(noop);
   } catch (_) {
     /* reactions are cosmetic; never let them break a reply */
   }

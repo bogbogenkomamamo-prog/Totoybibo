@@ -355,12 +355,15 @@ async function onEvent(ev) {
       setTimeout(() => { try { api.markAsRead(ev.threadID, true, () => {}); } catch {} }, rnd(250, 1200));
     }
 
-    const ok = await Promise.race([sendBanatReplyWithTyping(api, text, ev.threadID, null, {
+    let toId;                                         // send watchdog: must be CANCELLED once the send finishes
+    const timeout = new Promise((res) => { toId = setTimeout(() => { onSendResult(new Error("send timeout")); res(false); }, 45000); });
+    let ok;
+    try { ok = await Promise.race([sendBanatReplyWithTyping(api, text, ev.threadID, null, {
       trafficSendMessage: sendRaw,
       incomingText: ev.body,
       speed: cfg.speed,
       selfReact: cfg.selfReact ? { rate: cfg.selfReactRate } : false,   // only reacts to its OWN replies
-    }), sleep(45000).then(() => { onSendResult(new Error("send timeout")); return false; })]);
+    }), timeout]); } finally { clearTimeout(toId); }
     if (ok) {
       rememberBanatReply(ev.threadID, text, ev.senderID); log("bot", `reply [${social.type}] -> ${ev.threadID}`);
       if (Math.random() < 0.06) { S.awayUntil = Date.now() + rnd(20, 90) * 60e3; log("bot", `away break ${Math.round((S.awayUntil - Date.now()) / 60e3)} min`); }
@@ -691,6 +694,18 @@ for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { captureState("s
       console.log("[session] network blip — fast first reconnect in " + Math.round(w) + "ms");
     }
   }, "watch"), 1000).unref();
+})();
+
+// ---- one-time: clear the false "send timeout" debuff left over from the old timer bug ----
+(function clearFalseDebuff() {
+  try {
+    const mk = path.join(DATA, "fix-sendtimeout-v1.done");
+    if (fs.existsSync(mk)) return;
+    S.heat = 0; S.heatUntil = 0; S.pauseUntil = 0; S.sendFails = 0;
+    writeAtomic(path.join(DATA, "runtime.json"), { replies: S.replies, daily: S.daily, heat: 0, heatUntil: 0, pauseUntil: 0, awayUntil: S.awayUntil, at: Date.now() });
+    fs.writeFileSync(mk, String(Date.now()));
+    console.log("[heal] cleared false send-timeout debuff (one-time)");
+  } catch (e) { try { process.stderr.write("[clearFalseDebuff] " + (e && e.message) + "\n"); } catch {} }
 })();
 
 app.listen(PORT, () => { log("system", "server on " + PORT); if (cfg.appState) connect(); });

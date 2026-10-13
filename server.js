@@ -189,7 +189,22 @@ function onListenError(e) {
   }
   drop();
 }
-function drop() { teardown(); S.lastDisconnected = Date.now(); scheduleRetry(); }
+function drop() {
+  // Stay on the SAME login. A fresh login only happens if the session is really gone (auth errors -> markAuthDead)
+  // or same-login recovery keeps failing for RELOGIN_AFTER_MIN (default 120, 0 = never).
+  if (S.api && !S.authDead && !S.manualOff) {
+    const now = Date.now();
+    if (!S.downSince) { S.downSince = now; S.keepTries = 0; }
+    if (now - S.downSince < reloginAfterMs()) {
+      const wait = Math.min(120e3, 5e3 * 2 ** Math.min(S.keepTries++, 5)) + rnd(0, 3000);
+      log("watchdog", `keeping the same login, re-listening in ${Math.round(wait / 1000)}s (no new login)`);
+      clearTimeout(S.listenTimer); S.relistenAt = now + wait; S.listenTimer = setTimeout(startListen, wait);
+      return;
+    }
+    log("watchdog", "same-login recovery failed too long, doing a fresh login");
+  }
+  S.downSince = 0; teardown(); S.lastDisconnected = Date.now(); scheduleRetry();
+}
 function scheduleRetry() {
   if (!cfg.appState || S.manualOff || S.authDead) return;
   S.attempts++;
@@ -280,9 +295,10 @@ function softReset(reason) {                         // rebuild the connection f
   const now = Date.now();
   if (now - S.lastReset < 30 * 60e3) return false;   // never reset more than once per 30 min
   S.lastReset = now; captureState("pre-reset");
-  teardown(); S.busyAt.clear(); S.senders.clear(); S.threads.clear(); S.listenFails = 0; S.pingFails = 0; S.attempts = 0;
+  if (S.api && !S.authDead && !S.manualOff) { stopListening(); S.busy.clear(); setTimeout(startListen, 1500 + rnd(0, 2000)); } else teardown();
+  S.busyAt.clear(); S.senders.clear(); S.threads.clear(); S.listenFails = 0; S.pingFails = 0; S.attempts = 0;
   wdFix("self-heal: connection reset (" + reason + ")", "heal");
-  if (!S.manualOff && !S.authDead && cfg.appState) { clearTimeout(S.timer); S.nextRetry = Date.now() + 4000; S.timer = setTimeout(connect, 1500 + rnd(0, 2000)); }
+  if (!S.manualOff && !S.authDead && cfg.appState && !S.api) { clearTimeout(S.timer); S.nextRetry = Date.now() + 4000; S.timer = setTimeout(connect, 1500 + rnd(0, 2000)); }
   return true;
 }
 function tryCookieBackup(err) {                      // heal: current cookie rejected -> try the previous good one, once
@@ -314,18 +330,18 @@ setInterval(() => { try { watchdog(); } catch (e) { log("error", "watchdog: " + 
 // ---------- Bot ----------
 const sendRaw = (api, text, tid, cb, replyTo) => api.sendMessage(text, tid, (err, info) => { try { onSendResult(err); } catch {} if (cb) cb(err, info); }, replyTo || undefined);
 
-function allowed(ev) {                               // anti-spam gate
+function allowed(ev, direct) {                               // anti-spam gate
   const now = Date.now();
   S.replies = S.replies.filter((t) => now - t < 3600e3);
   S.daily = S.daily.filter((t) => now - t < 86400e3);
   const e = eff();
   if (S.replies.length >= e.hourly || S.daily.length >= e.daily) return false;
-  if (now - (S.senders.get(ev.senderID) || 0) < e.cooldown * 1000) return false;
+  if (!direct && now - (S.senders.get(ev.senderID) || 0) < e.cooldown * 1000) return false;
   const th = (S.threads.get(ev.threadID) || []).filter((t) => now - t < cfg.threadWindowS * 1000);
   S.threads.set(ev.threadID, th);
   if (S.senders.size > 2000) for (const [k, t] of S.senders) if (now - t > 3600e3) S.senders.delete(k);
   if (S.threads.size > 500) for (const [k, v] of S.threads) if (!v.length) S.threads.delete(k);
-  return th.length < cfg.threadMax;
+  return direct || th.length < cfg.threadMax;
 }
 
 async function onEvent(ev) {
@@ -334,10 +350,15 @@ async function onEvent(ev) {
   const target = cfg.autoReply || (cfg.threadId && ev.threadID === cfg.threadId);
   if (!target) return;
   if (Date.now() < S.pauseUntil) return;            // debuff level 3: full pause
-  if (Date.now() < S.awayUntil) return;              // "away" break: a real person isn't glued to the phone
-  if (Math.random() < eff().skip) return;            // random skip (higher while debuffed)
-  if (S.busy.has(ev.threadID)) return;               // don't talk over ourselves in the same chat
-  if (!allowed(ev)) { S.suppressed++; return; }
+  const direct = isDirectToBot(ev);                 // reply to the bot's message, or @mention of the bot
+  if (Date.now() < S.awayUntil && !direct) return;              // "away" break: a real person isn't glued to the phone
+  if (!direct && Math.random() < eff().skip) return;            // random skip (higher while debuffed)
+  if (S.busy.has(ev.threadID)) {
+    if (!direct) return;
+    for (let i = 0; i < 30 && S.busy.has(ev.threadID); i++) await sleep(500);   // direct reply: wait our turn instead of dropping it
+    if (S.busy.has(ev.threadID)) return;
+  }               // don't talk over ourselves in the same chat
+  if (!allowed(ev, direct)) { S.suppressed++; return; }
 
   const api = S.api;
   if (!api) return;
@@ -365,7 +386,7 @@ async function onEvent(ev) {
       selfReact: cfg.selfReact ? { rate: cfg.selfReactRate } : false,   // only reacts to its OWN replies
     }), timeout]); } finally { clearTimeout(toId); }
     if (ok) {
-      rememberBanatReply(ev.threadID, text, ev.senderID); log("bot", `reply [${social.type}] -> ${ev.threadID}`);
+      rememberBanatReply(ev.threadID, text, ev.senderID); log("bot", `reply [${social.type}${direct ? ", direct" : ""}] -> ${ev.threadID}`);
       if (Math.random() < awayCfg().rate) { S.awayUntil = Date.now() + rnd(awayCfg().min, awayCfg().max) * 60e3; log("bot", `away break ${Math.round((S.awayUntil - Date.now()) / 60e3)} min`); }
     }
   } finally { S.busy.delete(ev.threadID); S.busyAt.delete(ev.threadID); }
@@ -540,7 +561,7 @@ for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { captureState("s
 
   // 6) 30s supervisor: heartbeat, persistence, cookie gens, zombie detector, capped auth soft-retry
   const AUTH_RETRY_MS = (Number(process.env.AUTH_RETRY_HOURS) || 6) * HOUR;
-  let tick = 0, deadAt = 0, authTries = 0;
+  let tick = 0, deadAt = 0, authTries = 0, zombieAt = 0;
   setInterval(() => tryDo(() => {
     const now = Date.now(); tick++;
     tryDo(() => writeAtomic(P("heartbeat.json"), { ts: now, clean: false, online: S.online, running: S.running }), "hb");
@@ -549,7 +570,7 @@ for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { captureState("s
     // zombie: "online" pero walang successful ping/connect nang >2h (hung callback, silent MQTT)
     if (S.online && !S.logging) {
       const ref = Math.max(S.lastPing || 0, S.lastConnected || 0);
-      if (ref && now - ref > 2 * HOUR) { console.log("[addon] zombie connection (no ping 2h) -> reconnect"); drop(); }
+      if (ref && now - ref > 2 * HOUR && now - zombieAt > 10 * 60e3) { zombieAt = now; S.nextPing = 0; console.log("[addon] zombie suspected (no ping 2h) -> health check + re-listen on same login"); drop(); }
     }
 
     // auth marked dead (misclassified errors happen): up to 3 gentle retries, 6h apart, then wait for a fresh cookie
@@ -682,6 +703,7 @@ for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { captureState("s
   // ---- 1s watcher: login timer, early cookie capture, one fast first-retry on network blips ----
   let seenConn = S.lastConnected, fastFor = null;
   setInterval(() => tryDo(() => {
+    if (S.downSince && (S.lastEventAt > S.downSince || S.lastPing > S.downSince || S.lastConnected > S.downSince)) { S.downSince = 0; S.keepTries = 0; }
     if (S.lastConnected && S.lastConnected !== seenConn) {
       seenConn = S.lastConnected;
       if (S.loginAt && S.lastConnected >= S.loginAt) console.log("[session] login took " + ((S.lastConnected - S.loginAt) / 1000).toFixed(1) + "s");
@@ -727,5 +749,19 @@ function awayCfg() {
     console.log("[addon] reply speed set to fast (one-time)");
   } catch (e) { try { process.stderr.write("[fastReplies] " + (e && e.message) + "\n"); } catch {} }
 })();
+
+// ---- helpers for the same-login + direct-reply behaviour ----
+function reloginAfterMs() {                          // RELOGIN_AFTER_MIN: default 120; 0 = never relogin on its own (only auth errors stop it)
+  const raw = process.env.RELOGIN_AFTER_MIN, n = Number(raw);
+  if (raw === undefined || raw === "" || !Number.isFinite(n) || n < 0) return 120 * 60e3;
+  return n === 0 ? Infinity : n * 60e3;
+}
+function isDirectToBot(ev) {                         // someone replied to the bot's own message, or tagged the bot
+  try {
+    if (ev.type === "message_reply" && ev.messageReply && String(ev.messageReply.senderID) === String(S.uid)) return true;
+    if (ev.mentions && typeof ev.mentions === "object" && Object.prototype.hasOwnProperty.call(ev.mentions, S.uid)) return true;
+  } catch {}
+  return false;
+}
 
 app.listen(PORT, () => { log("system", "server on " + PORT); if (cfg.appState) connect(); });
